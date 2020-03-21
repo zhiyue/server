@@ -8,6 +8,7 @@
 
 package io.moquette.imhandler;
 
+import cn.wildfirechat.proto.ProtoConstants;
 import cn.wildfirechat.proto.WFCMessage;
 import io.moquette.spi.impl.Qos1PublishHandler;
 import io.netty.buffer.ByteBuf;
@@ -24,6 +25,19 @@ public class LoadRemoteMessagesHandler extends IMHandler<WFCMessage.LoadRemoteMe
         if (beforeUid == 0) {
             beforeUid = Long.MAX_VALUE;
         }
+
+        if (request.getConversation().getType() == ProtoConstants.ConversationType.ConversationType_Group) {
+            if (!m_messagesStore.isMemberInGroup(fromUser, request.getConversation().getTarget())) {
+                return ErrorCode.ERROR_CODE_NOT_IN_GROUP;
+            }
+        }
+
+        if (request.getConversation().getType() == ProtoConstants.ConversationType.ConversationType_Channel) {
+            if (!m_messagesStore.checkUserInChannel(fromUser, request.getConversation().getTarget())) {
+                return ErrorCode.ERROR_CODE_NOT_IN_CHANNEL;
+            }
+        }
+
         WFCMessage.PullMessageResult result = m_messagesStore.loadRemoteMessages(fromUser, request.getConversation(), beforeUid, request.getCount());
         byte[] data = result.toByteArray();
         LOG.info("User {} load message with count({}), payload size({})", fromUser, result.getMessageCount(), data.length);

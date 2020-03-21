@@ -9,6 +9,8 @@
 package com.xiaoleilu.loServer.action.admin;
 
 import cn.wildfirechat.common.APIPath;
+import cn.wildfirechat.pojos.InputUserId;
+import cn.wildfirechat.pojos.OutputStringList;
 import com.google.gson.Gson;
 import com.xiaoleilu.loServer.RestResult;
 import com.xiaoleilu.loServer.annotation.HttpMethod;
@@ -35,16 +37,16 @@ public class FriendRelationGetAction extends AdminAction {
     @Override
     public boolean action(Request request, Response response) {
         if (request.getNettyRequest() instanceof FullHttpRequest) {
-            InputGetFriendList inputGetFriendList = getRequestBody(request.getNettyRequest(), InputGetFriendList.class);
-            List<FriendData> dataList = messagesStore.getFriendList(inputGetFriendList.getUserId(), 0);
+            InputUserId inputGetFriendList = getRequestBody(request.getNettyRequest(), InputUserId.class);
+            List<FriendData> dataList = messagesStore.getFriendList(inputGetFriendList.getUserId(), null, 0);
             List<String> list = new ArrayList<>();
             for (FriendData data : dataList) {
-                if (data.getState() == inputGetFriendList.getStatus()) {
+                if (data.getState() == 0) {
                     list.add(data.getFriendUid());
                 }
             }
             response.setStatus(HttpResponseStatus.OK);
-            RestResult result = RestResult.ok(list);
+            RestResult result = RestResult.ok(new OutputStringList(list));
             response.setContent(new Gson().toJson(result));
         }
         return true;

@@ -21,6 +21,7 @@ import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import win.liyufan.im.Utility;
 
 /**
  * Action处理单元
@@ -51,6 +52,8 @@ abstract public class ActionHandler extends SimpleChannelInboundHandler<FullHttp
 				this.doAction(ctx, request, response);
 			}
 		} catch (Exception e) {
+		    e.printStackTrace();
+            Utility.printExecption(Logger, e);
 			Action errorAction = ServerSetting.getErrorAction(ServerSetting.MAPPING_ERROR);
 			request.putParam(UnknownErrorAction.ERROR_PARAM_NAME, e);
 			response.setContent(e.toString());
@@ -110,7 +113,8 @@ abstract public class ActionHandler extends SimpleChannelInboundHandler<FullHttp
 	 * @param response 响应对象
 	 */
 	private void doAction(ChannelHandlerContext ctx, Request request, Response response){
-	    if( "/route".equalsIgnoreCase(request.getPath()) && "OPTIONS".equalsIgnoreCase(request.getMethod())){
+	    if(("/route".equalsIgnoreCase(request.getPath()) || request.getPath().startsWith("/fs/"))
+            && "OPTIONS".equalsIgnoreCase(request.getMethod())){
 	        handleOptions(ctx, request, response);
 	        return;
         }

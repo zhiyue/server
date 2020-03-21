@@ -16,7 +16,15 @@
 
 package io.moquette.spi.impl;
 
+import cn.wildfirechat.common.ErrorCode;
+import cn.wildfirechat.pojos.SendMessageData;
+import cn.wildfirechat.pojos.UserOnlineStatus;
+import cn.wildfirechat.proto.ProtoConstants;
 import cn.wildfirechat.proto.WFCMessage;
+import com.google.gson.Gson;
+import com.hazelcast.core.Member;
+import com.hazelcast.util.StringUtil;
+import io.moquette.BrokerConstants;
 import io.moquette.persistence.RPCCenter;
 import io.moquette.interception.InterceptHandler;
 import io.moquette.interception.messages.InterceptAcknowledgedMessage;
@@ -38,9 +46,12 @@ import io.netty.handler.codec.mqtt.*;
 import io.netty.handler.timeout.IdleStateHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import win.liyufan.im.HttpUtils;
 import win.liyufan.im.Utility;
 
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import static io.moquette.spi.impl.InternalRepublisher.createPublishForQos;
 import static io.moquette.spi.impl.Utils.readBytesAndRewind;
@@ -55,7 +66,24 @@ import static io.moquette.server.ConnectionDescriptor.ConnectionState.*;
  *
  * Used by the front facing class ProtocolProcessorBootstrapper.
  */
+
 public class ProtocolProcessor {
+    private static ExecutorService executorCallback = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+
+    public void kickoffSession(final MemorySessionStore.Session session) {
+        mServer.getImBusinessScheduler().execute(()->{
+            ConnectionDescriptor descriptor = connectionDescriptors.getConnection(session.getClientID());
+            try {
+                if (descriptor != null) {
+                    processDisconnect(descriptor.getChannel(), true);
+                }
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+                Utility.printExecption(LOG, e);
+            }
+        });
+    }
+
     private void handleTargetRemovedFromCurrentNode(TargetEntry target) {
         System.out.println("kickof user " + target);
         if (target.type == TargetEntry.Type.TARGET_TYPE_USER) {
@@ -135,16 +163,22 @@ public class ProtocolProcessor {
                 this.connectionDescriptors, this.messagesPublisher, sessionsStore, server.getImBusinessScheduler(), server);
 
         mServer = server;
+
+        String onlineStatusCallback = server.getConfig().getProperty(BrokerConstants.USER_ONLINE_STATUS_CALLBACK);
+        if (!com.hazelcast.util.StringUtil.isNullOrEmpty(onlineStatusCallback)) {
+            mUserOnlineStatusCallback = onlineStatusCallback;
+        }
     }
+
+    private String mUserOnlineStatusCallback;
 
     public void processConnect(Channel channel, MqttConnectMessage msg) {
         MqttConnectPayload payload = msg.payload();
         String clientId = payload.clientIdentifier();
         LOG.info("Processing CONNECT message. CId={}, username={}", clientId, payload.userName());
 
-        if (msg.variableHeader().version() != MqttVersion.MQTT_3_1.protocolLevel()
-                && msg.variableHeader().version() != MqttVersion.MQTT_3_1_1.protocolLevel()
-                && msg.variableHeader().version() != MqttVersion.Wildfire_1.protocolLevel()) {
+        if (msg.variableHeader().version() < MqttVersion.MQTT_3_1_1.protocolLevel() ||
+                msg.variableHeader().version() >= MqttVersion.Wildfire_Max.protocolLevel()) {
             MqttConnAckMessage badProto = connAck(CONNECTION_REFUSED_UNACCEPTABLE_PROTOCOL_VERSION);
 
             LOG.error("MQTT protocol version is not valid. CId={}", clientId);
@@ -165,7 +199,11 @@ public class ProtocolProcessor {
 
         MqttVersion mqttVersion = MqttVersion.fromProtocolLevel(msg.variableHeader().version());
         if (!login(channel, msg, clientId, mqttVersion)) {
+            MqttConnAckMessage badId = connAck(CONNECTION_REFUSED_BAD_USER_NAME_OR_PASSWORD);
+
+            channel.writeAndFlush(badId);
             channel.close();
+            LOG.error("The MQTT login failure. Username={}", payload.userName());
             return;
         }
         if (!mServer.m_initialized) {
@@ -211,9 +249,18 @@ public class ProtocolProcessor {
         MemorySessionStore.Session session = m_sessionsStore.getSession(clientId);
         if(session != null) {
             session.refreshLastActiveTime();
+            forwardOnlineStatusEvent(payload.userName(), clientId, session.getPlatform(), UserOnlineStatus.ONLINE);
+        } else {
+            forwardOnlineStatusEvent(payload.userName(), clientId, ProtoConstants.Platform.Platform_UNSET, UserOnlineStatus.ONLINE);
         }
 
         LOG.info("The CONNECT message has been processed. CId={}, username={}", clientId, payload.userName());
+    }
+
+    public void forwardOnlineStatusEvent(String userId, String clientId, int platform, int status) {
+        if (!StringUtil.isNullOrEmpty(mUserOnlineStatusCallback)) {
+            executorCallback.execute(() -> HttpUtils.httpJsonPost(mUserOnlineStatusCallback, new Gson().toJson(new UserOnlineStatus(userId, clientId, platform, status))));
+        }
     }
 
     private MqttConnAckMessage connAck(MqttConnectReturnCode returnCode) {
@@ -244,7 +291,7 @@ public class ProtocolProcessor {
         // handle user authentication
         if (msg.variableHeader().hasUserName()) {
             int status = m_messagesStore.getUserStatus(msg.payload().userName());
-            if (status == 2) {
+            if (status == ProtoConstants.UserStatus.Forbidden) {
                 failedBlocked(channel);
                 return false;
             }
@@ -254,8 +301,16 @@ public class ProtocolProcessor {
 
                 MemorySessionStore.Session session = m_sessionsStore.getSession(clientId);
                 if (session == null) {
-                    m_sessionsStore.createNewSession(msg.payload().userName(), clientId, true, false);
+                    ErrorCode errorCode = m_sessionsStore.loadActiveSession(msg.payload().userName(), clientId);
+                    if (errorCode != ErrorCode.ERROR_CODE_SUCCESS) {
+                        return false;
+                    }
                     session = m_sessionsStore.getSession(clientId);
+                }
+
+                if (session.getDeleted() != 0) {
+                    LOG.error("user {} session {} is deleted. login failure", msg.payload().userName(), clientId);
+                    return false;
                 }
                 
                 if (session != null && session.getUsername().equals(msg.payload().userName())) {
@@ -465,7 +520,7 @@ public class ProtocolProcessor {
         }
 
         if (!clearSession) {
-            processConnectionLost(clientID, channel);
+            processConnectionLost(clientID, channel, clearSession);
             return;
         }
 
@@ -502,16 +557,20 @@ public class ProtocolProcessor {
             return;
         }
 
-        boolean stillPresent = this.connectionDescriptors.removeConnection(existingDescriptor);
-        if (!stillPresent) {
-            // another descriptor was inserted
-            LOG.warn("Another descriptor has been inserted. CId={}", clientID);
-            return;
-        }
+        this.connectionDescriptors.removeConnection(existingDescriptor);
 
         LOG.info("The DISCONNECT message has been processed. CId={}", clientID);
 
+        String username = NettyUtils.userName(channel);
+        MemorySessionStore.Session session = m_sessionsStore.getSession(clientID);
+        if(session != null) {
+            forwardOnlineStatusEvent(username, clientID, session.getPlatform(), UserOnlineStatus.LOGOUT);
+        }
+
+        channel.closeFuture();
+
         //disconnect the session
+
         m_sessionsStore.sessionForClient(clientID).disconnect(clearSession);
     }
 
@@ -542,17 +601,21 @@ public class ProtocolProcessor {
         return true;
     }
 
-    public void processConnectionLost(String clientID, Channel channel) {
+    public void processConnectionLost(String clientID, Channel channel, boolean clearSession) {
         LOG.info("Processing connection lost event. CId={}", clientID);
+
+        String username = NettyUtils.userName(channel);
+        MemorySessionStore.Session session = m_sessionsStore.getSession(clientID);
+        if(session != null) {
+            session.refreshLastActiveTime();
+            forwardOnlineStatusEvent(username, clientID, session.getPlatform(), clearSession ? UserOnlineStatus.LOGOUT : UserOnlineStatus.OFFLINE);
+        }
+
         ConnectionDescriptor oldConnDescr = new ConnectionDescriptor(clientID, channel);
         if(connectionDescriptors.removeConnection(oldConnDescr)) {
-            MemorySessionStore.Session session = m_sessionsStore.getSession(clientID);
-            if(session != null) {
-                session.refreshLastActiveTime();
-            }
-            String username = NettyUtils.userName(channel);
             m_interceptor.notifyClientConnectionLost(clientID, username);
         }
+
     }
 
     /**

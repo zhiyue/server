@@ -17,6 +17,7 @@ import io.netty.buffer.ByteBuf;
 import cn.wildfirechat.common.ErrorCode;
 import win.liyufan.im.IMTopic;
 import win.liyufan.im.MessageShardingUtil;
+import win.liyufan.im.Utility;
 
 import java.util.Set;
 
@@ -26,6 +27,7 @@ import static cn.wildfirechat.proto.ProtoConstants.ContentType.Text;
 public class SendMessageHandler extends IMHandler<WFCMessage.Message> {
     private int mSensitiveType = 0;  //命中敏感词时，0 失败，1 吞掉， 2 敏感词替换成*。
     private String mForwardUrl = null;
+    private int mBlacklistStrategy = 0; //黑名单中时，0失败，1吞掉。
     public SendMessageHandler() {
         super();
 
@@ -38,6 +40,14 @@ public class SendMessageHandler extends IMHandler<WFCMessage.Message> {
             mSensitiveType = Integer.parseInt(mServer.getConfig().getProperty(BrokerConstants.SENSITIVE_Filter_Type));
         } catch (Exception e) {
             e.printStackTrace();
+            Utility.printExecption(LOG, e);
+        }
+
+        try {
+            mBlacklistStrategy = Integer.parseInt(mServer.getConfig().getProperty(BrokerConstants.MESSAGE_Blacklist_Strategy));
+        } catch (Exception e) {
+            e.printStackTrace();
+            Utility.printExecption(LOG, e);
         }
     }
 
@@ -45,22 +55,33 @@ public class SendMessageHandler extends IMHandler<WFCMessage.Message> {
     public ErrorCode action(ByteBuf ackPayload, String clientID, String fromUser, boolean isAdmin, WFCMessage.Message message, Qos1PublishHandler.IMCallback callback) {
         ErrorCode errorCode = ErrorCode.ERROR_CODE_SUCCESS;
         if (message != null) {
+            boolean ignoreMsg = false;
             if (!isAdmin) {  //admin do not check the right
                 // 不能在端上直接发送撤回和群通知
                 if (message.getContent().getType() == 80 || (message.getContent().getType() >= 100 && message.getContent().getType() < 200)) {
                     return ErrorCode.INVALID_PARAMETER;
                 }
                 int userStatus = m_messagesStore.getUserStatus(fromUser);
-                if (userStatus == 1 || userStatus == 2) {
+                if (userStatus == ProtoConstants.UserStatus.Muted || userStatus == ProtoConstants.UserStatus.Forbidden) {
                     return ErrorCode.ERROR_CODE_FORBIDDEN_SEND_MSG;
                 }
 
                 if (message.getConversation().getType() == ProtoConstants.ConversationType.ConversationType_Private) {
-                    if (m_messagesStore.isBlacked(message.getConversation().getTarget(), fromUser)) {
-                        return ErrorCode.ERROR_CODE_IN_BLACK_LIST;
+                    errorCode = m_messagesStore.isAllowUserMessage(message.getConversation().getTarget(), fromUser);
+                    if (errorCode != ErrorCode.ERROR_CODE_SUCCESS) {
+                        if (errorCode == ErrorCode.ERROR_CODE_IN_BLACK_LIST && mBlacklistStrategy != ProtoConstants.BlacklistStrategy.Message_Reject) {
+                            ignoreMsg = true;
+                            errorCode = ErrorCode.ERROR_CODE_SUCCESS;
+                        } else {
+                            return errorCode;
+                        }
+                    }
+
+                    userStatus = m_messagesStore.getUserStatus(message.getConversation().getTarget());
+                    if (userStatus == ProtoConstants.UserStatus.Forbidden) {
+                        return ErrorCode.ERROR_CODE_USER_FORBIDDEN;
                     }
                 }
-
 
                 if (message.getConversation().getType() == ProtoConstants.ConversationType.ConversationType_Group ) {
                     errorCode = m_messagesStore.canSendMessageInGroup(fromUser, message.getConversation().getTarget());
@@ -86,7 +107,7 @@ public class SendMessageHandler extends IMHandler<WFCMessage.Message> {
                 publisher.forwardMessage(message, mForwardUrl);
             }
 
-            boolean ignoreMsg = false;
+
             if (!isAdmin && message.getContent().getType() == Text) {
                 Set<String> matched = m_messagesStore.handleSensitiveWord(message.getContent().getSearchableContent());
                 if (matched != null && !matched.isEmpty()) {
@@ -109,9 +130,7 @@ public class SendMessageHandler extends IMHandler<WFCMessage.Message> {
             }
 
             if (errorCode == ErrorCode.ERROR_CODE_SUCCESS) {
-                if (!ignoreMsg) {
-                    saveAndPublish(fromUser, clientID, message);
-                }
+                saveAndPublish(fromUser, clientID, message, ignoreMsg);
                 ackPayload = ackPayload.capacity(20);
                 ackPayload.writeLong(messageId);
                 ackPayload.writeLong(timestamp);

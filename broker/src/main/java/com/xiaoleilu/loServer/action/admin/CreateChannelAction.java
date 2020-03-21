@@ -44,7 +44,8 @@ public class CreateChannelAction extends AdminAction {
         if (request.getNettyRequest() instanceof FullHttpRequest) {
             InputCreateChannel inputCreateChannel = getRequestBody(request.getNettyRequest(), InputCreateChannel.class);
             if (inputCreateChannel != null
-                && !StringUtil.isNullOrEmpty(inputCreateChannel.getName())) {
+                && !StringUtil.isNullOrEmpty(inputCreateChannel.getName())
+                && !StringUtil.isNullOrEmpty(inputCreateChannel.getOwner())) {
 
 
                 if(StringUtil.isNullOrEmpty(inputCreateChannel.getTargetId())) {
@@ -58,7 +59,10 @@ public class CreateChannelAction extends AdminAction {
                         byteBuf.writeBytes(result);
                         ErrorCode errorCode = ErrorCode.fromCode(byteBuf.readByte());
                         if (errorCode == ErrorCode.ERROR_CODE_SUCCESS) {
-                            sendResponse(response, null, new OutputCreateChannel(inputCreateChannel.getTargetId()));
+                            byte[] data = new byte[byteBuf.readableBytes()];
+                            byteBuf.readBytes(data);
+                            String secret = new String(data);
+                            sendResponse(response, null, new OutputCreateChannel(inputCreateChannel.getTargetId(), secret));
                         } else {
                             sendResponse(response, errorCode, null);
                         }

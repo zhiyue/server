@@ -10,9 +10,12 @@ package io.moquette.imhandler;
 
 import cn.wildfirechat.proto.ProtoConstants;
 import cn.wildfirechat.proto.WFCMessage;
+import io.moquette.persistence.MemorySessionStore;
 import io.moquette.spi.impl.Qos1PublishHandler;
 import io.netty.buffer.ByteBuf;
 import cn.wildfirechat.common.ErrorCode;
+import io.netty.util.internal.StringUtil;
+import win.liyufan.im.I18n;
 import win.liyufan.im.IMTopic;
 import win.liyufan.im.MessageShardingUtil;
 
@@ -27,14 +30,20 @@ public class HandleFriendRequestHandler extends IMHandler<WFCMessage.HandleFrien
             long[] heads = new long[2];
             ErrorCode errorCode = m_messagesStore.handleFriendRequest(fromUser, request, builder, heads, isAdmin);
 
-            if (errorCode == ERROR_CODE_SUCCESS && !isAdmin) {
+            if (errorCode == ERROR_CODE_SUCCESS && !isAdmin && builder.getConversation() != null) {
                 long messageId = MessageShardingUtil.generateId();
                 long timestamp = System.currentTimeMillis();
                 builder.setMessageId(messageId);
                 builder.setServerTimestamp(timestamp);
-                saveAndPublish(request.getTargetUid(), null, builder.build());
+                saveAndPublish(request.getTargetUid(), null, builder.build(), false);
 
-                WFCMessage.MessageContent.Builder contentBuilder = WFCMessage.MessageContent.newBuilder().setType(90).setContent("以上是打招呼信息");
+                MemorySessionStore.Session session = m_sessionsStore.getSession(clientID);
+                String language = "zh_CN";
+                if (session != null && !StringUtil.isNullOrEmpty(session.getLanguage())) {
+                    language = session.getLanguage();
+                }
+                WFCMessage.MessageContent.Builder contentBuilder = WFCMessage.MessageContent.newBuilder().setType(90).setContent(I18n.getString(language, "Above_Greeting_Message"));
+                
                 builder = WFCMessage.Message.newBuilder();
                 builder.setFromUser(request.getTargetUid());
                 builder.setConversation(WFCMessage.Conversation.newBuilder().setTarget(fromUser).setLine(0).setType(ProtoConstants.ConversationType.ConversationType_Private).build());
@@ -44,15 +53,15 @@ public class HandleFriendRequestHandler extends IMHandler<WFCMessage.HandleFrien
 
                 messageId = MessageShardingUtil.generateId();
                 builder.setMessageId(messageId);
-                saveAndPublish(request.getTargetUid(), null, builder.build());
+                saveAndPublish(request.getTargetUid(), null, builder.build(), false);
 
-                contentBuilder.setContent("你们已经成为好友了，现在可以开始聊天了");
+                contentBuilder.setContent(I18n.getString(language, "Friend_Can_Start_Chat"));
                 builder.setContent(contentBuilder);
                 messageId = MessageShardingUtil.generateId();
                 builder.setMessageId(messageId);
                 timestamp = System.currentTimeMillis();
                 builder.setServerTimestamp(timestamp);
-                saveAndPublish(request.getTargetUid(), null, builder.build());
+                saveAndPublish(request.getTargetUid(), null, builder.build(), false);
 
                 publisher.publishNotification(IMTopic.NotifyFriendTopic, request.getTargetUid(), heads[0]);
                 publisher.publishNotification(IMTopic.NotifyFriendTopic, fromUser, heads[1]);
